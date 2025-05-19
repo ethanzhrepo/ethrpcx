@@ -11,6 +11,18 @@
 - Prometheus metrics integration for monitoring
 - Modular design for easy integration and extension
 
+![GitHub commit activity](https://img.shields.io/github/commit-activity/w/ethanzhrepo/ethrpcx)
+![GitHub Release](https://img.shields.io/github/v/release/ethanzhrepo/ethrpcx)
+![GitHub Repo stars](https://img.shields.io/github/stars/ethanzhrepo/ethrpcx)
+![GitHub License](https://img.shields.io/github/license/ethanzhrepo/ethrpcx)
+
+
+<a href="https://t.me/ethanatca"><img alt="" src="https://img.shields.io/badge/Telegram-%40ethanatca-blue" /></a>
+<a href="https://x.com/intent/follow?screen_name=0x99_Ethan">
+<img alt="X (formerly Twitter) Follow" src="https://img.shields.io/twitter/follow/0x99_Ethan">
+</a>
+
+
 ## Installation
 
 ```bash
