@@ -172,10 +172,10 @@ registry := ethrpcx.GetMetricsRegistry()
 ```
 
 可用指标包括：
-- RPC 请求计数和延迟
-- 连接成功/失败率
-- 订阅事件和错误
-- 聚合差异
+- RPC 请求计数和延迟 (ethrpcx_rpc_requests_total, ethrpcx_rpc_request_duration_seconds)
+- 连接跟踪 (ethrpcx_active_connections, ethrpcx_connection_attempts_total)
+- 订阅跟踪 (ethrpcx_subscription_errors_total, ethrpcx_subscription_reconnects_total)
+- 聚合指标 (ethrpcx_aggregation_discrepancies_total)
 
 ### OpenTelemetry 集成
 

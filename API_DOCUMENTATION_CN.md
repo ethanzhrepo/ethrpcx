@@ -343,9 +343,10 @@ registry := ethrpcx.GetMetricsRegistry()
 
 - `ethrpcx_rpc_requests_total` - RPC 请求总数
 - `ethrpcx_rpc_request_duration_seconds` - RPC 请求延迟
-- `ethrpcx_endpoint_health_status` - 端点健康状态（1=健康，0=不健康）
-- `ethrpcx_subscription_events_total` - 订阅事件总数
+- `ethrpcx_active_connections` - 活跃连接数
+- `ethrpcx_connection_attempts_total` - 连接尝试总数
 - `ethrpcx_subscription_errors_total` - 订阅错误总数
+- `ethrpcx_subscription_reconnects_total` - 订阅重连总数
 - `ethrpcx_aggregation_discrepancies_total` - 聚合结果中的差异
 
 ### 启用跟踪

@@ -343,9 +343,10 @@ Available metrics include:
 
 - `ethrpcx_rpc_requests_total` - Total number of RPC requests
 - `ethrpcx_rpc_request_duration_seconds` - RPC request latency
-- `ethrpcx_endpoint_health_status` - Endpoint health status (1=healthy, 0=unhealthy)
-- `ethrpcx_subscription_events_total` - Total number of subscription events
+- `ethrpcx_active_connections` - Number of active connections
+- `ethrpcx_connection_attempts_total` - Total connection attempts
 - `ethrpcx_subscription_errors_total` - Total number of subscription errors
+- `ethrpcx_subscription_reconnects_total` - Total number of subscription reconnections
 - `ethrpcx_aggregation_discrepancies_total` - Discrepancies in aggregated results
 
 ### Enabling Tracing

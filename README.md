@@ -172,10 +172,10 @@ registry := ethrpcx.GetMetricsRegistry()
 ```
 
 Available metrics include:
-- RPC request counts and latencies
-- Connection success/failure rates
-- Subscription events and errors
-- Aggregation discrepancies
+- RPC request counts and latencies (ethrpcx_rpc_requests_total, ethrpcx_rpc_request_duration_seconds)
+- Connection tracking (ethrpcx_active_connections, ethrpcx_connection_attempts_total)
+- Subscription tracking (ethrpcx_subscription_errors_total, ethrpcx_subscription_reconnects_total)
+- Aggregation metrics (ethrpcx_aggregation_discrepancies_total)
 
 ### OpenTelemetry Integration
 

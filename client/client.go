@@ -187,7 +187,6 @@ func (c *Client) GetActiveEndpoint() (*Endpoint, error) {
 	// Variables to track best endpoints
 	var (
 		healthyEndpoints      []*Endpoint
-		unhealthyEndpoints    []*Endpoint
 		bestUnhealthyEndpoint *Endpoint
 		oldestFailureTime     time.Time
 	)
@@ -199,8 +198,6 @@ func (c *Client) GetActiveEndpoint() (*Endpoint, error) {
 			if endpoint.IsHealthy {
 				healthyEndpoints = append(healthyEndpoints, endpoint)
 			} else {
-				unhealthyEndpoints = append(unhealthyEndpoints, endpoint)
-
 				// Track the endpoint with the oldest failure time
 				if bestUnhealthyEndpoint == nil || endpoint.LastFailure.Before(oldestFailureTime) {
 					bestUnhealthyEndpoint = endpoint
@@ -323,11 +320,6 @@ func calculateBackoff(endpoint *Endpoint) time.Duration {
 // createContext creates a context with the client's default timeout
 func (c *Client) createContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), c.config.Timeout)
-}
-
-// createCustomContext creates a context with a custom timeout
-func (c *Client) createCustomContext(timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), timeout)
 }
 
 // Call executes an RPC call with the given method and arguments

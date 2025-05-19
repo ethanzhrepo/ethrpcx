@@ -33,8 +33,8 @@ func main() {
 	config := client.Config{
 		Endpoints: []string{
 			// Replace with your own endpoints
-			"wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY",
-			"https://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY",
+			"wss://ethereum-rpc.publicnode.com",
+			"https://ethereum-rpc.publicnode.com",
 		},
 		Timeout:           15 * time.Second,
 		ConnectionTimeout: 30 * time.Second,
