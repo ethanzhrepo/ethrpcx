@@ -449,6 +449,11 @@ func (c *Client) BlockByNumber(ctx context.Context, number *big.Int, full bool) 
 	return endpoint.Client.BlockByNumber(ctx, number)
 }
 
+func (c *Client) Ping(ctx context.Context) error {
+	var chainID string
+	return c.Call(ctx, &chainID, "eth_chainId")
+}
+
 // initMetrics initializes Prometheus metrics
 func initMetrics() {
 	// Placeholder for metrics initialization
