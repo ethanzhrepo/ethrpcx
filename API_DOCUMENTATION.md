@@ -232,6 +232,30 @@ var result YourResultType
 err := ethClient.Call(ctx, &result, "eth_methodName", param1, param2)
 ```
 
+### Ping
+
+Checks connection health by making a lightweight `eth_chainId` call.
+
+```go
+err := ethClient.Ping(ctx)
+if err != nil {
+    log.Printf("Connection health check failed: %v", err)
+}
+```
+
+### GetEthClient
+
+Retrieves the underlying `*ethclient.Client` from the currently active endpoint.
+
+```go
+ethClient, err := client.GetEthClient(ctx)
+if err != nil {
+    log.Fatalf("Failed to get underlying eth client: %v", err)
+}
+// Now use the native ethclient directly
+balance, err := ethClient.BalanceAt(ctx, address, nil)
+```
+
 ## Subscriptions
 
 ### SubscribeNewHeads

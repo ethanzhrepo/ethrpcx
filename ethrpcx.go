@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -110,6 +111,21 @@ func (c *Client) SubscribeNewHeads(ctx context.Context, ch chan<- *types.Header)
 func (c *Client) SubscribeLogs(ctx context.Context, q ethereum.FilterQuery, ch chan<- types.Log) (ethereum.Subscription, error) {
 	watcher := c.getSharedWatcher()
 	return watcher.SubscribeLogs(ctx, q, ch)
+}
+
+// Ping checks connection health by making a lightweight eth_chainId call
+func (c *Client) Ping(ctx context.Context) error {
+	return c.Client.Ping(ctx)
+}
+
+// GetEthClient returns the underlying native Ethereum client from the active endpoint
+func (c *Client) GetEthClient(ctx context.Context) (*ethclient.Client, error) {
+	endpoint, err := c.Client.GetActiveEndpoint()
+	if err != nil {
+		return nil, err
+	}
+
+	return endpoint.Client, nil
 }
 
 // BlockHeader re-exports client.BlockHeader for convenience

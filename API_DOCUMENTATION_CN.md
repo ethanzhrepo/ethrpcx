@@ -232,6 +232,30 @@ var result YourResultType
 err := ethClient.Call(ctx, &result, "eth_methodName", param1, param2)
 ```
 
+### Ping
+
+通过执行轻量级的 `eth_chainId` 调用来检查连接健康状况。
+
+```go
+err := ethClient.Ping(ctx)
+if err != nil {
+    log.Printf("连接健康检查失败: %v", err)
+}
+```
+
+### GetEthClient
+
+从当前活跃的端点获取底层的 `*ethclient.Client`。
+
+```go
+ethClient, err := client.GetEthClient(ctx)
+if err != nil {
+    log.Fatalf("获取底层eth客户端失败: %v", err)
+}
+// 现在可以直接使用原生的ethclient
+balance, err := ethClient.BalanceAt(ctx, address, nil)
+```
+
 ## 订阅
 
 ### SubscribeNewHeads
