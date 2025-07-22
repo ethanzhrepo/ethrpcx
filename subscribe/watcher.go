@@ -13,6 +13,24 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
+// ReconnectConfig defines the configuration for subscription reconnection
+type ReconnectConfig struct {
+	InitialDelay    time.Duration
+	MaxDelay        time.Duration
+	BackoffFactor   float64
+	MaxRetries      int
+	ReconnectOnErr  bool
+}
+
+// DefaultReconnectConfig provides sensible defaults for reconnection
+var DefaultReconnectConfig = ReconnectConfig{
+	InitialDelay:   5 * time.Second,
+	MaxDelay:       2 * time.Minute,
+	BackoffFactor:  2.0,
+	MaxRetries:     -1, // Unlimited retries
+	ReconnectOnErr: true,
+}
+
 // EventType represents the type of Ethereum event to subscribe to
 type EventType string
 
@@ -238,13 +256,14 @@ func (w *EventWatcher) createResilientSubscription(
 ) (ethereum.Subscription, error) {
 
 	resilientSub := &resilientSubscription{
-		watcher:    w,
-		eventType:  eventType,
-		filter:     filterQuery,
-		errChan:    make(chan error),
-		done:       make(chan struct{}),
-		baseSub:    initialSub,
-		internalCh: internalCh, // Store the internal channel for reconnection
+		watcher:      w,
+		eventType:    eventType,
+		filter:       filterQuery,
+		errChan:      make(chan error),
+		done:         make(chan struct{}),
+		baseSub:      initialSub,
+		internalCh:   internalCh, // Store the internal channel for reconnection
+		reconnectMgr: NewReconnectManager(DefaultReconnectConfig),
 	}
 
 	// Start the error monitoring goroutine
@@ -284,18 +303,62 @@ func (s *wrappedSubscription) Unsubscribe() {
 	}
 }
 
+// ReconnectManager handles the reconnection logic
+type ReconnectManager struct {
+	config       ReconnectConfig
+	currentDelay time.Duration
+	retryCount   int
+	mu           sync.Mutex
+}
+
+// NewReconnectManager creates a new reconnect manager
+func NewReconnectManager(config ReconnectConfig) *ReconnectManager {
+	return &ReconnectManager{
+		config:       config,
+		currentDelay: config.InitialDelay,
+	}
+}
+
+// NextDelay calculates and returns the next retry delay
+func (rm *ReconnectManager) NextDelay() time.Duration {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	
+	if rm.config.MaxRetries > 0 && rm.retryCount >= rm.config.MaxRetries {
+		return -1 // No more retries
+	}
+	
+	delay := rm.currentDelay
+	rm.currentDelay = time.Duration(float64(rm.currentDelay) * rm.config.BackoffFactor)
+	if rm.currentDelay > rm.config.MaxDelay {
+		rm.currentDelay = rm.config.MaxDelay
+	}
+	rm.retryCount++
+	
+	return delay
+}
+
+// Reset resets the retry state after a successful connection
+func (rm *ReconnectManager) Reset() {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	
+	rm.currentDelay = rm.config.InitialDelay
+	rm.retryCount = 0
+}
+
 // resilientSubscription represents a subscription that automatically reconnects
 type resilientSubscription struct {
-	watcher      *EventWatcher
-	eventType    EventType
-	filter       *ethereum.FilterQuery
-	errChan      chan error
-	done         chan struct{}
-	mu           sync.Mutex
-	baseSub      ethereum.Subscription
-	internalCh   interface{} // Store the internal channel
-	reconnectMu  sync.Mutex  // Mutex for reconnection process
-	reconnecting bool        // Flag to track reconnection state
+	watcher         *EventWatcher
+	eventType       EventType
+	filter          *ethereum.FilterQuery
+	errChan         chan error
+	done            chan struct{}
+	mu              sync.Mutex
+	baseSub         ethereum.Subscription
+	internalCh      interface{} // Store the internal channel
+	reconnectMgr    *ReconnectManager
+	reconnecting    bool
 }
 
 // Err returns a channel that emits subscription errors
@@ -317,118 +380,19 @@ func (s *resilientSubscription) Unsubscribe() {
 
 // monitor monitors the subscription and attempts to reconnect on failure
 func (s *resilientSubscription) monitor(ctx context.Context) {
-	var retryDelay = 5 * time.Second
-	maxRetryDelay := 2 * time.Minute
-
 	for {
-		// Wait for either a base subscription error or done signal
 		select {
 		case err, ok := <-s.baseSub.Err():
-			// Check if the error channel was closed (subscription ended gracefully)
 			if !ok {
-				log.Printf("Subscription base error channel closed, monitoring stopped")
-				// Close our own error channel to signal proper termination
-				s.mu.Lock()
-				if s.errChan != nil {
-					close(s.errChan)
-					s.errChan = nil
-				}
-				s.baseSub = nil
-				s.mu.Unlock()
+				s.handleChannelClosed()
 				return
 			}
-
-			// Check if we're already reconnecting
-			s.reconnectMu.Lock()
-			if s.reconnecting {
-				s.reconnectMu.Unlock()
-				log.Printf("Ignoring subscription error while already reconnecting: %v", err)
+			
+			if !s.shouldReconnect(err) {
 				continue
 			}
-			s.reconnecting = true
-			s.reconnectMu.Unlock()
-
-			// Propagate the error to the user
-			select {
-			case s.errChan <- err:
-				// Successfully sent error
-			default:
-				// Error channel is full, log it
-				log.Printf("Error from subscription: %v (not reported to user - channel full)", err)
-			}
-
-			// Attempt to reconnect
-			log.Printf("Subscription error: %v, reconnecting in %v...", err, retryDelay)
-
-			// Unsubscribe from the current subscription before reconnecting
-			s.mu.Lock()
-			if s.baseSub != nil {
-				s.baseSub.Unsubscribe()
-				s.baseSub = nil // Avoid double unsubscribe
-			}
-			s.mu.Unlock()
-
-			time.Sleep(retryDelay)
-
-			// Increase retry delay with exponential backoff
-			retryDelay *= 2
-			if retryDelay > maxRetryDelay {
-				retryDelay = maxRetryDelay
-			}
-
-			// Try to resubscribe
-			var newSub ethereum.Subscription
-			var subErr error
-
-			// Create a new context for subscription
-			timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-
-			// Reuse the same internal channel for the new subscription
-			switch s.eventType {
-			case NewHeads:
-				// Reuse the internal channel stored during initial subscription
-				if headerCh, ok := s.internalCh.(chan *types.Header); ok {
-					newSub, subErr = s.watcher.SubscribeNewHeads(timeoutCtx, headerCh)
-				} else {
-					subErr = errors.New("invalid internal channel type for NewHeads event")
-				}
-
-			case Logs:
-				if s.filter != nil {
-					// Reuse the internal channel stored during initial subscription
-					if logsCh, ok := s.internalCh.(chan types.Log); ok {
-						newSub, subErr = s.watcher.SubscribeLogs(timeoutCtx, *s.filter, logsCh)
-					} else {
-						subErr = errors.New("invalid internal channel type for Logs event")
-					}
-				} else {
-					subErr = errors.New("missing filter for log subscription")
-				}
-
-			default:
-				subErr = fmt.Errorf("unsupported event type for reconnect: %s", s.eventType)
-			}
-
-			cancel()
-
-			// Reset reconnecting flag
-			s.reconnectMu.Lock()
-			s.reconnecting = false
-			s.reconnectMu.Unlock()
-
-			if subErr != nil {
-				log.Printf("Failed to resubscribe: %v, will retry in %v", subErr, retryDelay)
-				continue
-			}
-
-			// Store the new subscription
-			s.mu.Lock()
-			s.baseSub = newSub
-			s.mu.Unlock()
-
-			// Reset the retry delay on successful reconnection
-			retryDelay = 5 * time.Second
-			log.Printf("Successfully reconnected subscription for event type: %s", s.eventType)
+			
+			s.handleReconnection(ctx, err)
 
 		case <-s.done:
 			return
@@ -438,4 +402,119 @@ func (s *resilientSubscription) monitor(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// handleChannelClosed handles when the subscription error channel is closed
+func (s *resilientSubscription) handleChannelClosed() {
+	log.Printf("Subscription base error channel closed, monitoring stopped")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	if s.errChan != nil {
+		close(s.errChan)
+		s.errChan = nil
+	}
+	s.baseSub = nil
+}
+
+// shouldReconnect determines if we should attempt to reconnect
+func (s *resilientSubscription) shouldReconnect(err error) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	if s.reconnecting {
+		log.Printf("Ignoring subscription error while already reconnecting: %v", err)
+		return false
+	}
+	
+	s.reconnecting = true
+	
+	// Propagate the error to the user
+	select {
+	case s.errChan <- err:
+		// Successfully sent error
+	default:
+		// Error channel is full, log it
+		log.Printf("Error from subscription: %v (not reported to user - channel full)", err)
+	}
+	
+	return true
+}
+
+// handleReconnection performs the reconnection logic
+func (s *resilientSubscription) handleReconnection(ctx context.Context, err error) {
+	defer func() {
+		s.mu.Lock()
+		s.reconnecting = false
+		s.mu.Unlock()
+	}()
+	
+	// Unsubscribe from the current subscription
+	s.mu.Lock()
+	if s.baseSub != nil {
+		s.baseSub.Unsubscribe()
+		s.baseSub = nil
+	}
+	s.mu.Unlock()
+	
+	// Attempt reconnection with backoff
+	for {
+		delay := s.reconnectMgr.NextDelay()
+		if delay < 0 {
+			log.Printf("Max reconnection attempts reached for event type: %s", s.eventType)
+			return
+		}
+		
+		log.Printf("Subscription error: %v, reconnecting in %v...", err, delay)
+		time.Sleep(delay)
+		
+		if newSub := s.tryResubscribe(ctx); newSub != nil {
+			s.mu.Lock()
+			s.baseSub = newSub
+			s.mu.Unlock()
+			
+			s.reconnectMgr.Reset()
+			log.Printf("Successfully reconnected subscription for event type: %s", s.eventType)
+			return
+		}
+	}
+}
+
+// tryResubscribe attempts to create a new subscription
+func (s *resilientSubscription) tryResubscribe(ctx context.Context) ethereum.Subscription {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	
+	switch s.eventType {
+	case NewHeads:
+		if headerCh, ok := s.internalCh.(chan *types.Header); ok {
+			if newSub, err := s.watcher.SubscribeNewHeads(timeoutCtx, headerCh); err == nil {
+				return newSub
+			} else {
+				log.Printf("Failed to resubscribe to new heads: %v", err)
+			}
+		} else {
+			log.Printf("Invalid internal channel type for NewHeads event")
+		}
+		
+	case Logs:
+		if s.filter != nil {
+			if logsCh, ok := s.internalCh.(chan types.Log); ok {
+				if newSub, err := s.watcher.SubscribeLogs(timeoutCtx, *s.filter, logsCh); err == nil {
+					return newSub
+				} else {
+					log.Printf("Failed to resubscribe to logs: %v", err)
+				}
+			} else {
+				log.Printf("Invalid internal channel type for Logs event")
+			}
+		} else {
+			log.Printf("Missing filter for log subscription")
+		}
+		
+	default:
+		log.Printf("Unsupported event type for reconnect: %s", s.eventType)
+	}
+	
+	return nil
 }

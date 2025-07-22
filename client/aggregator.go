@@ -78,8 +78,8 @@ func (c *Client) aggregateCall(ctx context.Context, result interface{}, method s
 	// Launch goroutines to call each endpoint
 	for _, endpoint := range activeEndpoints {
 		go func(ep *Endpoint) {
-			// Create a new result value of the same type
-			resultVal := reflect.New(reflect.TypeOf(result).Elem()).Interface()
+			// Create a new result value of the same type with optimized reflection
+			resultVal := c.createResultValue(result)
 
 			// Make the RPC call
 			err := ep.RpcClient.CallContext(childCtx, resultVal, method, args...)
@@ -152,12 +152,18 @@ func (c *Client) aggregateCall(ctx context.Context, result interface{}, method s
 
 			// If we have consensus already, or this is the first result and we prefer first results
 			if consensusReached || (c.config.PreferFirstResult && firstResult != nil) {
+				var selectedResult interface{}
 				if consensusReached {
-					// Use consensus result
-					reflect.ValueOf(result).Elem().Set(reflect.ValueOf(consensusResult).Elem())
+					selectedResult = consensusResult
 				} else {
-					// Use first result
-					reflect.ValueOf(result).Elem().Set(reflect.ValueOf(firstResult).Elem())
+					selectedResult = firstResult
+				}
+				
+				// Use optimized copy method
+				if err := c.copyResult(result, selectedResult); err != nil {
+					log.Printf("Failed to copy result: %v", err)
+					// Fallback to reflection if copy fails
+					reflect.ValueOf(result).Elem().Set(reflect.ValueOf(selectedResult).Elem())
 				}
 
 				// Start a goroutine to collect and log remaining results
@@ -193,7 +199,11 @@ func (c *Client) aggregateCall(ctx context.Context, result interface{}, method s
 
 				if len(maxValues) > 0 {
 					// Use the most common result
-					reflect.ValueOf(result).Elem().Set(reflect.ValueOf(maxValues[0]).Elem())
+					if err := c.copyResult(result, maxValues[0]); err != nil {
+						log.Printf("Failed to copy result: %v", err)
+						// Fallback to reflection if copy fails
+						reflect.ValueOf(result).Elem().Set(reflect.ValueOf(maxValues[0]).Elem())
+					}
 					logAggregateResultStats(method, responsesToCountMap(responses), errorsMap)
 					return nil
 				}
@@ -207,7 +217,11 @@ func (c *Client) aggregateCall(ctx context.Context, result interface{}, method s
 			// Check if we have any results despite the timeout
 			if firstResult != nil {
 				// Use any result we have
-				reflect.ValueOf(result).Elem().Set(reflect.ValueOf(firstResult).Elem())
+				if err := c.copyResult(result, firstResult); err != nil {
+					log.Printf("Failed to copy result: %v", err)
+					// Fallback to reflection if copy fails
+					reflect.ValueOf(result).Elem().Set(reflect.ValueOf(firstResult).Elem())
+				}
 				go func() {
 					// Collect any remaining results
 					remaining := endpointCount - receivedCount
@@ -304,6 +318,39 @@ func logAggregateResultStats(method string, responses map[string]int, errors map
 			}
 		}
 	}
+}
+
+// createResultValue creates a new result value with optimized reflection
+func (c *Client) createResultValue(result interface{}) interface{} {
+	resultType := reflect.TypeOf(result)
+	if resultType.Kind() != reflect.Ptr {
+		// This shouldn't happen with proper usage, but handle it gracefully
+		return reflect.New(resultType).Interface()
+	}
+	
+	elemType := resultType.Elem()
+	return reflect.New(elemType).Interface()
+}
+
+// copyResult copies the result value with optimized reflection
+func (c *Client) copyResult(dst, src interface{}) error {
+	dstVal := reflect.ValueOf(dst)
+	srcVal := reflect.ValueOf(src)
+	
+	if dstVal.Kind() != reflect.Ptr || srcVal.Kind() != reflect.Ptr {
+		return errors.New("both dst and src must be pointers")
+	}
+	
+	dstElem := dstVal.Elem()
+	srcElem := srcVal.Elem()
+	
+	if !srcElem.Type().AssignableTo(dstElem.Type()) {
+		return fmt.Errorf("source type %v is not assignable to destination type %v", 
+			srcElem.Type(), dstElem.Type())
+	}
+	
+	dstElem.Set(srcElem)
+	return nil
 }
 
 // GetMajorityResponse returns the response that was returned by the majority of endpoints

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // MockClient implements ClientInterface for testing
@@ -143,7 +147,8 @@ func (m *MockEventWatcher) SubscribeNewHeads(ctx context.Context, ch chan<- *typ
 	if m.mockSubscribeNewHeads != nil {
 		return m.mockSubscribeNewHeads(ctx, ch)
 	}
-	return m.EventWatcher.SubscribeNewHeads(ctx, ch)
+	// Return an error instead of calling the real method to avoid nil pointer issues
+	return nil, errors.New("mock subscription not configured")
 }
 
 // GetSubscribeCallCount returns the number of times SubscribeNewHeads was called
@@ -217,11 +222,12 @@ func TestEventWatcherSubscribeWithReconnect(t *testing.T) {
 	}
 
 	// Create a test channel and add a checker for received headers
-	headerCh := make(chan *types.Header, 10)
+	fullHeaderCh := make(chan *types.Header, 10)
+	var headerCh chan<- *types.Header = fullHeaderCh
 	headerReceived := make(chan struct{})
 
 	go func() {
-		header := <-headerCh
+		header := <-fullHeaderCh
 		if header != nil && header.Number.Uint64() == 100 {
 			close(headerReceived)
 		}
@@ -301,7 +307,8 @@ func TestEventWatcherContextCancellation(t *testing.T) {
 	}
 
 	// Create a test channel
-	headerCh := make(chan *types.Header, 10)
+	fullHeaderCh := make(chan *types.Header, 10)
+	var headerCh chan<- *types.Header = fullHeaderCh
 
 	// Create a context that we will cancel
 	ctx, cancel := context.WithCancel(context.Background())
@@ -360,7 +367,8 @@ func TestConcurrentSubscriptions(t *testing.T) {
 	// Create multiple concurrent subscriptions
 	const numSubscriptions = 5
 	subs := make([]ethereum.Subscription, numSubscriptions)
-	channels := make([]chan *types.Header, numSubscriptions)
+	fullChannels := make([]chan *types.Header, numSubscriptions)
+	channels := make([]chan<- *types.Header, numSubscriptions)
 
 	// Setup all subscriptions
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -370,7 +378,8 @@ func TestConcurrentSubscriptions(t *testing.T) {
 	wg.Add(numSubscriptions)
 
 	for i := 0; i < numSubscriptions; i++ {
-		channels[i] = make(chan *types.Header, 10)
+		fullChannels[i] = make(chan *types.Header, 10)
+		channels[i] = fullChannels[i]
 
 		go func(idx int) {
 			defer wg.Done()
@@ -481,11 +490,12 @@ func TestEventWatcherSubscribeLogsWithReconnect(t *testing.T) {
 	}
 
 	// Create a test channel and add a checker for received logs
-	logsCh := make(chan types.Log, 10)
+	fullLogsCh := make(chan types.Log, 10)
+	var logsCh chan<- types.Log = fullLogsCh
 	logReceived := make(chan struct{})
 
 	go func() {
-		log := <-logsCh
+		log := <-fullLogsCh
 		if log.BlockNumber == 100 && log.Address == common.HexToAddress("0x123456789abcdef0") {
 			close(logReceived)
 		}

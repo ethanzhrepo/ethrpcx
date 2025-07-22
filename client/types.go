@@ -3,6 +3,7 @@ package client
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,193 @@ type Config struct {
 	EnableMetrics bool
 }
 
+// ValidationError represents a configuration validation error
+type ValidationError struct {
+	Field   string
+	Message string
+}
+
+// Error implements the error interface
+func (e ValidationError) Error() string {
+	return fmt.Sprintf("validation error in field '%s': %s", e.Field, e.Message)
+}
+
+// ConfigValidator provides configuration validation functionality
+type ConfigValidator struct{}
+
+// NewConfigValidator creates a new configuration validator
+func NewConfigValidator() *ConfigValidator {
+	return &ConfigValidator{}
+}
+
+// ValidateConfig is a convenience function to validate a configuration
+func ValidateConfig(config Config) error {
+	validator := NewConfigValidator()
+	validationErrors := validator.Validate(config)
+	if len(validationErrors) > 0 {
+		return validationErrors[0]
+	}
+	return nil
+}
+
+// Validate validates the configuration and returns any validation errors
+func (cv *ConfigValidator) Validate(config Config) []ValidationError {
+	var errors []ValidationError
+	
+	// Validate endpoints
+	if len(config.Endpoints) == 0 {
+		errors = append(errors, ValidationError{
+			Field:   "Endpoints",
+			Message: "at least one endpoint must be provided",
+		})
+	} else {
+		for i, endpoint := range config.Endpoints {
+			if err := cv.validateEndpoint(endpoint); err != nil {
+				errors = append(errors, ValidationError{
+					Field:   fmt.Sprintf("Endpoints[%d]", i),
+					Message: err.Error(),
+				})
+			}
+		}
+	}
+	
+	// Validate timeouts
+	if config.Timeout < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "Timeout",
+			Message: "timeout cannot be negative",
+		})
+	} else if config.Timeout > 0 && config.Timeout < time.Second {
+		errors = append(errors, ValidationError{
+			Field:   "Timeout",
+			Message: "timeout should be at least 1 second for practical use",
+		})
+	}
+	
+	if config.ConnectionTimeout < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "ConnectionTimeout", 
+			Message: "connection timeout cannot be negative",
+		})
+	} else if config.ConnectionTimeout > 0 && config.ConnectionTimeout < time.Second {
+		errors = append(errors, ValidationError{
+			Field:   "ConnectionTimeout",
+			Message: "connection timeout should be at least 1 second",
+		})
+	}
+	
+	// Validate retry settings
+	if config.MaxConnectionRetries < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "MaxConnectionRetries",
+			Message: "max connection retries cannot be negative",
+		})
+	} else if config.MaxConnectionRetries > 100 {
+		errors = append(errors, ValidationError{
+			Field:   "MaxConnectionRetries",
+			Message: "max connection retries should not exceed 100 for practical use",
+		})
+	}
+	
+	if config.RetryDelay < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "RetryDelay",
+			Message: "retry delay cannot be negative",
+		})
+	}
+	
+	if config.MaxRetryDelay < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "MaxRetryDelay",
+			Message: "max retry delay cannot be negative",
+		})
+	} else if config.RetryDelay > 0 && config.MaxRetryDelay > 0 && config.MaxRetryDelay < config.RetryDelay {
+		errors = append(errors, ValidationError{
+			Field:   "MaxRetryDelay",
+			Message: "max retry delay should be greater than or equal to retry delay",
+		})
+	}
+	
+	// Validate aggregation settings
+	if config.EnableAggregation && len(config.Endpoints) < 2 {
+		errors = append(errors, ValidationError{
+			Field:   "EnableAggregation",
+			Message: "aggregation requires at least 2 endpoints",
+		})
+	}
+	
+	return errors
+}
+
+// validateEndpoint validates a single endpoint URL
+func (cv *ConfigValidator) validateEndpoint(endpoint string) error {
+	if strings.TrimSpace(endpoint) == "" {
+		return errors.New("endpoint cannot be empty")
+	}
+	
+	// Parse the URL to validate format
+	parsedURL, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid URL format: %v", err)
+	}
+	
+	// Check supported schemes
+	scheme := strings.ToLower(parsedURL.Scheme)
+	if scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss" {
+		return fmt.Errorf("unsupported scheme '%s'. Supported schemes: http, https, ws, wss", scheme)
+	}
+	
+	// Check if host is provided
+	if parsedURL.Host == "" {
+		return errors.New("endpoint must include a host")
+	}
+	
+	return nil
+}
+
+// ValidateAndWarn validates configuration and logs warnings for suboptimal settings
+func (cv *ConfigValidator) ValidateAndWarn(config Config) []ValidationError {
+	errors := cv.Validate(config)
+	
+	// Check for warnings (non-blocking issues)
+	cv.checkWarnings(config)
+	
+	return errors
+}
+
+// checkWarnings checks for configuration that might not be optimal
+func (cv *ConfigValidator) checkWarnings(config Config) {
+	// Check for very short timeouts
+	if config.Timeout > 0 && config.Timeout < 5*time.Second {
+		fmt.Printf("Warning: Timeout of %v is quite short and may cause frequent failures\n", config.Timeout)
+	}
+	
+	// Check for very long timeouts
+	if config.Timeout > 2*time.Minute {
+		fmt.Printf("Warning: Timeout of %v is very long and may affect performance\n", config.Timeout)
+	}
+	
+	// Check aggregation without consensus preference
+	if config.EnableAggregation && !config.PreferFirstResult && len(config.Endpoints) > 5 {
+		fmt.Printf("Warning: Aggregation with many endpoints (%d) and consensus preference may be slow\n", len(config.Endpoints))
+	}
+	
+	// Check mixed endpoint types
+	hasHTTP := false
+	hasWS := false
+	for _, endpoint := range config.Endpoints {
+		if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+			hasHTTP = true
+		} else if strings.HasPrefix(endpoint, "ws://") || strings.HasPrefix(endpoint, "wss://") {
+			hasWS = true
+		}
+	}
+	
+	if hasHTTP && hasWS {
+		fmt.Printf("Warning: Mixed HTTP and WebSocket endpoints may have different capabilities for subscriptions\n")
+	}
+}
+
 // Default configuration values
 var DefaultConfig = Config{
 	Timeout:              15 * time.Second,
@@ -73,8 +261,8 @@ const (
 	// RateLimitError represents rate limiting by RPC provider
 	RateLimitError ErrorType = "rate_limit_error"
 
-	// ValidationError represents invalid parameters
-	ValidationError ErrorType = "validation_error"
+	// ValidationRequestError represents invalid parameters
+	ValidationRequestError ErrorType = "validation_error"
 
 	// ServerError represents server errors
 	ServerError ErrorType = "server_error"
@@ -152,7 +340,7 @@ func ClassifyError(err error, endpoint string) *Error {
 			"exceeded",
 			"429",
 		},
-		ValidationError: {
+		ValidationRequestError: {
 			"invalid",
 			"execution reverted",
 			"bad request",
@@ -197,7 +385,7 @@ func ClassifyError(err error, endpoint string) *Error {
 		message = "Requested resource not found"
 	case RateLimitError:
 		message = "RPC rate limit exceeded"
-	case ValidationError:
+	case ValidationRequestError:
 		message = "Invalid request parameters or execution reverted"
 	case ServerError:
 		message = "RPC server error"

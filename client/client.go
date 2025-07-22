@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/ethanzhrepo/ethrpcx/metrics"
 )
 
 // Client is a high-availability Ethereum RPC client
@@ -25,8 +28,12 @@ type Client struct {
 
 // NewClient creates a new eth client with the given options
 func NewClient(config Config) (*Client, error) {
-	if len(config.Endpoints) == 0 {
-		return nil, errors.New("at least one endpoint must be provided")
+	// Validate configuration
+	validator := NewConfigValidator()
+	validationErrors := validator.ValidateAndWarn(config)
+	if len(validationErrors) > 0 {
+		// Return the first validation error
+		return nil, validationErrors[0]
 	}
 
 	// Use default config values for any unset fields
@@ -69,6 +76,10 @@ func NewClient(config Config) (*Client, error) {
 
 	if config.EnableMetrics {
 		initMetrics()
+		// Import and initialize the metrics package
+		if err := initializeClientMetrics(); err != nil {
+			log.Printf("Warning: Failed to initialize metrics: %v", err)
+		}
 	}
 
 	if config.EnableTracing {
@@ -124,7 +135,7 @@ func (c *Client) connectToEndpoint(endpoint *Endpoint) error {
 
 	for i := 0; i < c.config.MaxConnectionRetries; i++ {
 		log.Printf("Attempting to connect to endpoint %s (attempt %d/%d)...",
-			endpoint.URL, i+1, c.config.MaxConnectionRetries)
+			sanitizeURL(endpoint.URL), i+1, c.config.MaxConnectionRetries)
 
 		rpcClient, err = rpc.DialContext(ctx, endpoint.URL)
 		if err == nil {
@@ -143,7 +154,7 @@ func (c *Client) connectToEndpoint(endpoint *Endpoint) error {
 				endpoint.IsHealthy = true
 				endpoint.LastUsed = time.Now()
 				endpoint.ConsecutiveFailures = 0 // Reset failures on successful connection
-				log.Printf("Successfully connected to endpoint %s", endpoint.URL)
+				log.Printf("Successfully connected to endpoint %s", sanitizeURL(endpoint.URL))
 				return nil
 			}
 
@@ -152,7 +163,7 @@ func (c *Client) connectToEndpoint(endpoint *Endpoint) error {
 			err = callErr
 			log.Printf("Connected but chain verification failed: %v", callErr)
 		} else {
-			log.Printf("Connection to endpoint %s failed: %v", endpoint.URL, err)
+			log.Printf("Connection to endpoint %s failed: %v", sanitizeURL(endpoint.URL), err)
 		}
 
 		// Wait before retrying, but check context timeout
@@ -343,20 +354,37 @@ func (c *Client) Call(ctx context.Context, result interface{}, method string, ar
 		return err
 	}
 
-	// Execute the call
+	// Execute the call with metrics
+	start := time.Now()
 	err = endpoint.RpcClient.CallContext(ctx, result, method, args...)
+	duration := time.Since(start)
+	
 	if err == nil {
-		// Successful call - reset failure count
+		// Successful call - reset failure count and record metrics
 		endpoint.mu.Lock()
 		endpoint.IsHealthy = true
 		endpoint.ConsecutiveFailures = 0
 		endpoint.mu.Unlock()
+		
+		// Record successful metrics if enabled
+		if c.config.EnableMetrics {
+			sanitizedURL := sanitizeURL(endpoint.URL)
+			metrics.RecordRPCRequest(method, sanitizedURL, "success")
+			metrics.RecordRPCRequestDuration(method, sanitizedURL, duration)
+		}
 		return nil
 	}
 
 	// Classify the error
 	rpcErr := ClassifyError(err, endpoint.URL)
 	lastErr = rpcErr
+
+	// Record error metrics if enabled
+	if c.config.EnableMetrics {
+		sanitizedURL := sanitizeURL(endpoint.URL)
+		metrics.RecordRPCRequest(method, sanitizedURL, "error")
+		metrics.RecordRPCRequestDuration(method, sanitizedURL, duration)
+	}
 
 	// Update endpoint health metrics
 	endpoint.mu.Lock()
@@ -454,12 +482,56 @@ func (c *Client) Ping(ctx context.Context) error {
 	return c.Call(ctx, &chainID, "eth_chainId")
 }
 
+// sanitizeURL removes sensitive information from URLs for logging
+func sanitizeURL(rawURL string) string {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		// If parsing fails, use regex to mask potential API keys
+		apiKeyRegex := regexp.MustCompile(`([a-fA-F0-9]{32,}|[a-zA-Z0-9_-]{20,})`)
+		return apiKeyRegex.ReplaceAllString(rawURL, "***")
+	}
+	
+	// Mask password in userinfo
+	if parsedURL.User != nil {
+		parsedURL.User = url.UserPassword(parsedURL.User.Username(), "***")
+	}
+	
+	// Mask potential API keys in path and query
+	path := parsedURL.Path
+	apiKeyRegex := regexp.MustCompile(`/v3/[a-fA-F0-9]{32}`)
+	path = apiKeyRegex.ReplaceAllString(path, "/v3/***")
+	parsedURL.Path = path
+	
+	// Mask API keys in query parameters
+	query := parsedURL.Query()
+	for key, values := range query {
+		if strings.Contains(strings.ToLower(key), "key") || strings.Contains(strings.ToLower(key), "token") {
+			for i := range values {
+				values[i] = "***"
+			}
+			query[key] = values
+		}
+	}
+	parsedURL.RawQuery = query.Encode()
+	
+	return parsedURL.String()
+}
+
+// initializeClientMetrics initializes the metrics package
+func initializeClientMetrics() error {
+	metrics.Initialize()
+	return nil
+}
+
 // initMetrics initializes Prometheus metrics
 func initMetrics() {
-	// Placeholder for metrics initialization
+	log.Printf("Metrics initialization enabled")
 }
 
 // initTracing initializes OpenTelemetry tracing
 func initTracing() {
-	// Placeholder for tracing initialization
+	log.Printf("OpenTelemetry tracing initialization enabled")
+	// Note: Full OpenTelemetry setup would require additional configuration
+	// This could include setting up trace providers, exporters, etc.
+	// For now, we log that tracing is enabled
 }

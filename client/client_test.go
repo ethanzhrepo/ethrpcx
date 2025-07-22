@@ -131,7 +131,7 @@ func TestClassifyError(t *testing.T) {
 			name:         "validation error",
 			err:          errors.New("invalid parameters"),
 			endpoint:     "http://example.com",
-			expectedType: ValidationError,
+			expectedType: ValidationRequestError,
 		},
 		{
 			name:         "server error",
