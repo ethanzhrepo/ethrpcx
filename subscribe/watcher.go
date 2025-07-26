@@ -75,7 +75,9 @@ func (w *EventWatcher) SubscribeNewHeads(ctx context.Context, ch chan<- *types.H
 		return nil, errors.New("event watcher is closed")
 	}
 
-	// Get an active endpoint
+	var lastErr error
+	
+	// Try to get an active endpoint first
 	endpoint, err := w.client.GetActiveEndpoint()
 	if err != nil {
 		return nil, err
@@ -86,27 +88,116 @@ func (w *EventWatcher) SubscribeNewHeads(ctx context.Context, ch chan<- *types.H
 		return nil, fmt.Errorf("endpoint %s is not a WebSocket endpoint, required for subscriptions", endpoint.URL)
 	}
 
-	// Create the subscription
-	sub, err := endpoint.Client.SubscribeNewHead(ctx, ch)
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to new heads: %w", err)
+	// Try the primary endpoint first with enhanced timeout protection
+	sub, err := w.trySubscribeToNewHeads(ctx, endpoint, ch)
+	if err == nil {
+		// Register the subscription
+		w.mu.Lock()
+		subID := fmt.Sprintf("newHeads-%p", sub)
+		w.subscriptions[subID] = sub
+		w.mu.Unlock()
+
+		// Create a wrapper subscription that will clean up when closed
+		return &wrappedSubscription{
+			Subscription: sub,
+			onUnsubscribe: func() {
+				w.mu.Lock()
+				delete(w.subscriptions, subID)
+				w.mu.Unlock()
+			},
+		}, nil
 	}
 
-	// Register the subscription
-	w.mu.Lock()
-	subID := fmt.Sprintf("newHeads-%p", sub)
-	w.subscriptions[subID] = sub
-	w.mu.Unlock()
+	lastErr = err
+	log.Printf("Primary WebSocket endpoint failed for newHeads: %v, trying other endpoints", err)
 
-	// Create a wrapper subscription that will clean up when closed
-	return &wrappedSubscription{
-		Subscription: sub,
-		onUnsubscribe: func() {
+	// If primary endpoint fails, try to get another active endpoint with retry
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		// Wait a bit before retry
+		if i > 0 {
+			time.Sleep(time.Duration(i) * 2 * time.Second)
+		}
+		
+		// Try to get a different active endpoint
+		retryEndpoint, retryErr := w.client.GetActiveEndpoint()
+		if retryErr != nil {
+			lastErr = retryErr
+			log.Printf("Failed to get active endpoint for newHeads on retry %d: %v", i+1, retryErr)
+			continue
+		}
+		
+		// Skip if it's the same failed endpoint and this is first retry
+		if retryEndpoint == endpoint && i == 0 {
+			continue
+		}
+		
+		// Only try WebSocket endpoints
+		if !retryEndpoint.IsWss {
+			log.Printf("Endpoint %s is not WebSocket for newHeads, skipping", retryEndpoint.URL)
+			continue
+		}
+
+		// Try to subscribe using this endpoint
+		sub, err = w.trySubscribeToNewHeads(ctx, retryEndpoint, ch)
+		if err == nil {
+			// Register the subscription
 			w.mu.Lock()
-			delete(w.subscriptions, subID)
+			subID := fmt.Sprintf("newHeads-%p", sub)
+			w.subscriptions[subID] = sub
 			w.mu.Unlock()
-		},
-	}, nil
+
+			log.Printf("Successfully subscribed to newHeads using backup endpoint: %s", retryEndpoint.URL)
+			
+			// Create a wrapper subscription that will clean up when closed
+			return &wrappedSubscription{
+				Subscription: sub,
+				onUnsubscribe: func() {
+					w.mu.Lock()
+					delete(w.subscriptions, subID)
+					w.mu.Unlock()
+				},
+			}, nil
+		}
+		
+		lastErr = err
+		log.Printf("WebSocket endpoint %s failed for newHeads on retry %d: %v", retryEndpoint.URL, i+1, err)
+	}
+
+	return nil, fmt.Errorf("failed to subscribe to newHeads on any WebSocket endpoint: %w", lastErr)
+}
+
+// trySubscribeToNewHeads attempts to create a newHeads subscription on a specific endpoint with timeout protection  
+func (w *EventWatcher) trySubscribeToNewHeads(ctx context.Context, endpoint *client.Endpoint, ch chan<- *types.Header) (ethereum.Subscription, error) {
+	// Quick health check before attempting subscription
+	if !w.isEndpointHealthy(endpoint) {
+		return nil, fmt.Errorf("endpoint %s failed health check", endpoint.URL)
+	}
+	
+	// Create a shorter timeout context for subscription establishment
+	subscribeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	
+	// Create subscription with timeout protection
+	done := make(chan struct {
+		sub ethereum.Subscription
+		err error
+	}, 1)
+	
+	go func() {
+		sub, err := endpoint.Client.SubscribeNewHead(subscribeCtx, ch)
+		done <- struct {
+			sub ethereum.Subscription
+			err error
+		}{sub, err}
+	}()
+	
+	select {
+	case result := <-done:
+		return result.sub, result.err
+	case <-subscribeCtx.Done():
+		return nil, fmt.Errorf("newHeads subscription timeout after 30s for endpoint %s: %w", endpoint.URL, subscribeCtx.Err())
+	}
 }
 
 // SubscribeLogs subscribes to logs matching the given filter criteria
@@ -115,7 +206,9 @@ func (w *EventWatcher) SubscribeLogs(ctx context.Context, q ethereum.FilterQuery
 		return nil, errors.New("event watcher is closed")
 	}
 
-	// Get an active endpoint
+	var lastErr error
+	
+	// Try to get an active endpoint first
 	endpoint, err := w.client.GetActiveEndpoint()
 	if err != nil {
 		return nil, err
@@ -126,27 +219,163 @@ func (w *EventWatcher) SubscribeLogs(ctx context.Context, q ethereum.FilterQuery
 		return nil, fmt.Errorf("endpoint %s is not a WebSocket endpoint, required for subscriptions", endpoint.URL)
 	}
 
-	// Create the subscription
-	sub, err := endpoint.Client.SubscribeFilterLogs(ctx, q, ch)
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to logs: %w", err)
+	// Try the primary endpoint first with enhanced timeout protection
+	sub, err := w.trySubscribeToEndpoint(ctx, endpoint, q, ch)
+	if err == nil {
+		// Register the subscription
+		w.mu.Lock()
+		subID := fmt.Sprintf("logs-%p", sub)
+		w.subscriptions[subID] = sub
+		w.mu.Unlock()
+
+		// Create a wrapper subscription that will clean up when closed
+		return &wrappedSubscription{
+			Subscription: sub,
+			onUnsubscribe: func() {
+				w.mu.Lock()
+				delete(w.subscriptions, subID)
+				w.mu.Unlock()
+			},
+		}, nil
 	}
 
-	// Register the subscription
-	w.mu.Lock()
-	subID := fmt.Sprintf("logs-%p", sub)
-	w.subscriptions[subID] = sub
-	w.mu.Unlock()
+	lastErr = err
+	log.Printf("Primary WebSocket endpoint failed: %v, trying other endpoints", err)
 
-	// Create a wrapper subscription that will clean up when closed
-	return &wrappedSubscription{
-		Subscription: sub,
-		onUnsubscribe: func() {
+	// If primary endpoint fails, try to get another active endpoint with retry
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		// Wait a bit before retry
+		if i > 0 {
+			time.Sleep(time.Duration(i) * 2 * time.Second)
+		}
+		
+		// Try to get a different active endpoint
+		retryEndpoint, retryErr := w.client.GetActiveEndpoint()
+		if retryErr != nil {
+			lastErr = retryErr
+			log.Printf("Failed to get active endpoint on retry %d: %v", i+1, retryErr)
+			continue
+		}
+		
+		// Skip if it's the same failed endpoint and this is first retry
+		if retryEndpoint == endpoint && i == 0 {
+			continue
+		}
+		
+		// Only try WebSocket endpoints
+		if !retryEndpoint.IsWss {
+			log.Printf("Endpoint %s is not WebSocket, skipping", retryEndpoint.URL)
+			continue
+		}
+
+		// Try to subscribe using this endpoint
+		sub, err = w.trySubscribeToEndpoint(ctx, retryEndpoint, q, ch)
+		if err == nil {
+			// Register the subscription
 			w.mu.Lock()
-			delete(w.subscriptions, subID)
+			subID := fmt.Sprintf("logs-%p", sub)
+			w.subscriptions[subID] = sub
 			w.mu.Unlock()
-		},
-	}, nil
+
+			log.Printf("Successfully subscribed using backup endpoint: %s", retryEndpoint.URL)
+			
+			// Create a wrapper subscription that will clean up when closed
+			return &wrappedSubscription{
+				Subscription: sub,
+				onUnsubscribe: func() {
+					w.mu.Lock()
+					delete(w.subscriptions, subID)
+					w.mu.Unlock()
+				},
+			}, nil
+		}
+		
+		lastErr = err
+		log.Printf("WebSocket endpoint %s failed on retry %d: %v", retryEndpoint.URL, i+1, err)
+	}
+
+	return nil, fmt.Errorf("failed to subscribe to logs on any WebSocket endpoint: %w", lastErr)
+}
+
+// trySubscribeToEndpoint attempts to create a subscription on a specific endpoint with timeout protection
+func (w *EventWatcher) trySubscribeToEndpoint(ctx context.Context, endpoint *client.Endpoint, q ethereum.FilterQuery, ch chan<- types.Log) (ethereum.Subscription, error) {
+	// Quick health check before attempting subscription
+	if !w.isEndpointHealthy(endpoint) {
+		return nil, fmt.Errorf("endpoint %s failed health check", endpoint.URL)
+	}
+	
+	// Create a shorter timeout context for subscription establishment
+	subscribeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	
+	// Create subscription with timeout protection
+	done := make(chan struct {
+		sub ethereum.Subscription
+		err error
+	}, 1)
+	
+	go func() {
+		sub, err := endpoint.Client.SubscribeFilterLogs(subscribeCtx, q, ch)
+		done <- struct {
+			sub ethereum.Subscription
+			err error
+		}{sub, err}
+	}()
+	
+	select {
+	case result := <-done:
+		return result.sub, result.err
+	case <-subscribeCtx.Done():
+		return nil, fmt.Errorf("subscription timeout after 30s for endpoint %s: %w", endpoint.URL, subscribeCtx.Err())
+	}
+}
+
+// connectToEndpoint attempts to connect to a specific endpoint (helper method)
+func (w *EventWatcher) connectToEndpoint(endpoint *client.Endpoint) error {
+	// This is a simplified connection attempt - in a full implementation,
+	// we would need access to the client's connectToEndpoint method
+	// For now, we just check if the endpoint is accessible by trying a simple operation
+	log.Printf("Attempting to reconnect to endpoint: %s", endpoint.URL)
+	
+	// Since we don't have direct access to the client's connection logic,
+	// we rely on the GetActiveEndpoint mechanism to handle reconnection
+	return fmt.Errorf("endpoint reconnection handled by client internally")
+}
+
+// isEndpointHealthy performs a quick health check on an endpoint
+func (w *EventWatcher) isEndpointHealthy(endpoint *client.Endpoint) bool {
+	// Basic checks we can perform without accessing private fields
+	if endpoint == nil {
+		return false
+	}
+	
+	// Check if the endpoint URL is valid for WebSocket
+	if !endpoint.IsWss {
+		return false
+	}
+	
+	// Check if the Client is available (this is a public field)
+	if endpoint.Client == nil {
+		return false
+	}
+	
+	// Try a very quick ping-style operation with short timeout
+	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	// Use the client's underlying RpcClient to make a quick call
+	if endpoint.RpcClient != nil {
+		var result string
+		err := endpoint.RpcClient.CallContext(pingCtx, &result, "eth_chainId")
+		if err != nil {
+			log.Printf("Endpoint %s failed health check: %v", endpoint.URL, err)
+			return false
+		}
+		return true
+	}
+	
+	return false
 }
 
 // SubscribeWithReconnect subscribes to an event with automatic reconnection
