@@ -17,11 +17,6 @@
 ![GitHub License](https://img.shields.io/github/license/ethanzhrepo/ethrpcx)
 
 
-<a href="https://t.me/ethanatca"><img alt="" src="https://img.shields.io/badge/Telegram-%40ethanatca-blue" /></a>
-<a href="https://x.com/intent/follow?screen_name=0x99_Ethan">
-<img alt="X (formerly Twitter) Follow" src="https://img.shields.io/twitter/follow/0x99_Ethan">
-</a>
-
 
 ## Installation
 
